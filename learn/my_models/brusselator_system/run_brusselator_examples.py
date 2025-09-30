@@ -66,8 +66,8 @@ def example_parameter_study():
         plt.subplot(1, 3, i+1)
         plt.plot(time_points, center_evolution[:, 0], 'b-', linewidth=2, label='u')
         plt.plot(time_points, center_evolution[:, 1], 'r-', linewidth=2, label='v')
-        plt.xlabel('时间 t')
-        plt.ylabel('浓度')
+        plt.xlabel('Time t')
+        plt.ylabel('Concentration')
         plt.title(f'B = {B}')
         plt.legend()
         plt.grid(True, alpha=0.3)
@@ -146,9 +146,9 @@ def example_analysis_tools():
         plt.subplot(2, 3, i+1)
         plt.plot(time_points, evolution[:, 0], 'b-', label='u', linewidth=2)
         plt.plot(time_points, evolution[:, 1], 'r-', label='v', linewidth=2)
-        plt.xlabel('时间 t')
-        plt.ylabel('浓度')
-        plt.title(f'点({px}, {py})')
+        plt.xlabel('Time t')
+        plt.ylabel('Concentration')
+        plt.title(f'Point ({px}, {py})')
         plt.legend()
         plt.grid(True, alpha=0.3)
     
@@ -160,9 +160,9 @@ def example_analysis_tools():
         plt.plot(evolution[:, 0], evolution[:, 1], linewidth=2, 
                 label=f'({px}, {py})', alpha=0.7)
     
-    plt.xlabel('u浓度')
-    plt.ylabel('v浓度')
-    plt.title('相空间轨迹')
+    plt.xlabel('u Concentration')
+    plt.ylabel('v Concentration')
+    plt.title('Phase Space Trajectories')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -185,14 +185,14 @@ def example_analysis_tools():
         u_vals = prediction[:, 0]
         v_vals = prediction[:, 1]
         
-        print(f"t={t}: u_均值={np.mean(u_vals):.3f}±{np.std(u_vals):.3f}, "
-              f"v_均值={np.mean(v_vals):.3f}±{np.std(v_vals):.3f}")
+        print(f"t={t}: u_mean={np.mean(u_vals):.3f}±{np.std(u_vals):.3f}, "
+              f"v_mean={np.mean(v_vals):.3f}±{np.std(v_vals):.3f}")
 
 if __name__ == "__main__":
     import numpy as np
     
-    # 设置matplotlib支持中文
-    plt.rcParams['font.sans-serif'] = ['Arial', 'SimHei']
+    # 设置matplotlib字体
+    plt.rcParams['font.sans-serif'] = ['Arial']
     plt.rcParams['axes.unicode_minus'] = False
     
     print("🧪 Brusselator反应扩散方程组求解器示例")

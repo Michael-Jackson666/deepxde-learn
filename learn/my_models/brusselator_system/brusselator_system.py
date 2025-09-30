@@ -161,15 +161,15 @@ class BrusselatorSolver:
         print("🚀 开始训练耦合反应扩散方程组...")
         
         # 第一阶段：Adam训练
-        self.model.compile(optimizer="adam", lr=adam_lr, metrics=["l2 relative error"])
+        self.model.compile(optimizer="adam", lr=adam_lr)  # 移除metrics避免错误
         
         start_time = time.time()
         self.losshistory, self.train_state = self.model.train(iterations=adam_iterations)
         train_time = time.time() - start_time
         
         print(f"📊 Adam训练完成！ 用时: {train_time:.1f}秒")
-        print(f"最终训练损失: {self.train_state.loss_train:.6f}")
-        print(f"最终测试损失: {self.train_state.loss_test:.6f}")
+        print(f"最终训练损失: {np.sum(self.train_state.loss_train):.6f}")
+        print(f"最终测试损失: {np.sum(self.train_state.loss_test):.6f}")
         
         # 第二阶段：L-BFGS精细调优
         if use_lbfgs:
@@ -178,8 +178,8 @@ class BrusselatorSolver:
             self.losshistory, self.train_state = self.model.train()
             
             print("🎉 L-BFGS训练完成！")
-            print(f"最终训练损失: {self.train_state.loss_train:.6f}")
-            print(f"最终测试损失: {self.train_state.loss_test:.6f}")
+            print(f"最终训练损失: {np.sum(self.train_state.loss_train):.6f}")
+            print(f"最终测试损失: {np.sum(self.train_state.loss_test):.6f}")
     
     def predict(self, x_points):
         """
@@ -206,13 +206,13 @@ class BrusselatorSolver:
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         
         im1 = axes[0].contourf(X_test, Y_test, u_init, levels=20, cmap='viridis')
-        axes[0].set_title('u初始条件 (t=0)')
+        axes[0].set_title('u Initial Condition (t=0)')
         axes[0].set_xlabel('x')
         axes[0].set_ylabel('y')
         plt.colorbar(im1, ax=axes[0])
         
         im2 = axes[1].contourf(X_test, Y_test, v_init, levels=20, cmap='plasma')
-        axes[1].set_title('v初始条件 (t=0)')
+        axes[1].set_title('v Initial Condition (t=0)')
         axes[1].set_xlabel('x')
         axes[1].set_ylabel('y')
         plt.colorbar(im2, ax=axes[1])
