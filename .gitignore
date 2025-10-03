@@ -34,3 +34,7 @@ deepxde/_version.py
 *.ckpt
 *.pth
 *.pt
+
+# mac
+/.DS_Store
+.DS_Store
