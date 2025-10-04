@@ -15,7 +15,7 @@
 ```mermaid
 graph LR
     A[Tutorial 1<br/>1D Poisson] --> B[Tutorial 2<br/>2D Heat Equation]
-    B --> C[Tutorial 3<br/>Reaction-Diffusion]
+    B --> C[Tutorial 3<br/>PDE Systems]
     C --> D[Tutorial 4<br/>Complex Geometry]
     D --> E[Tutorial 5<br/>Inverse Problems]
 ```
@@ -26,7 +26,7 @@ graph LR
 |------|----------|------|------|----------|----------|
 | 1️⃣ | **1D泊松方程** | [`poisson_1d.ipynb`](poisson_1d.ipynb) | ⭐⭐ | 30分钟 | PDE基础, 边界条件, PINN |
 | 2️⃣ | **2D热传导方程** | [`heat_2d.ipynb`](heat_2d.ipynb) | ⭐⭐⭐ | 45分钟 | 时空PDE, 初始条件, 多维可视化 |
-| 3️⃣ | **反应扩散方程组** | `reaction_diffusion.ipynb` | ⭐⭐⭐⭐ | 60分钟 | 耦合系统, 多变量PDE |
+| 3️⃣ | **PDE方程组** | [`system_pde.ipynb`](system_pde.ipynb) | ⭐⭐⭐⭐ | 60分钟 | 耦合系统, 多变量PDE, 反应扩散 |
 | 4️⃣ | **复杂几何域** | `complex_geometry.ipynb` | ⭐⭐⭐⭐ | 45分钟 | 不规则域, CSG几何 |
 | 5️⃣ | **逆问题求解** | `inverse_problems.ipynb` | ⭐⭐⭐⭐⭐ | 90分钟 | 参数反演, 数据同化 |
 
@@ -134,15 +134,17 @@ Day 5-7: 选择应用场景实战
 ✅ 物理扩散过程的数值模拟
 ```
 
-### Tutorial 3: Reaction-Diffusion Systems (计划中)
+### Tutorial 3: PDE Systems
 ```python
 # 你将探索：
-✅ 多变量耦合PDE系统
-✅ 反应动力学与扩散的结合
-✅ 模式形成(Pattern Formation)
-✅ 非线性PDE的求解策略
-✅ 生物/化学系统建模
+✅ 多变量耦合PDE系统求解
+✅ 反应扩散方程组的数值模拟
+✅ 多输出神经网络的构建和训练
+✅ 变量间耦合效应的分析
+✅ 复杂系统的可视化技巧
 ```
+
+### Tutorial 4: Complex Geometry (计划中)
 
 ---
 
