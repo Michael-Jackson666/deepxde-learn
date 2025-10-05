@@ -27,8 +27,10 @@ graph LR
 | 1️⃣ | **1D泊松方程** | [`poisson_1d.ipynb`](poisson_1d.ipynb) | ⭐⭐ | 30分钟 | PDE基础, 边界条件, PINN |
 | 2️⃣ | **2D热传导方程** | [`heat_2d.ipynb`](heat_2d.ipynb) | ⭐⭐⭐ | 45分钟 | 时空PDE, 初始条件, 多维可视化 |
 | 3️⃣ | **PDE方程组** | [`system_pde.ipynb`](system_pde.ipynb) | ⭐⭐⭐⭐ | 60分钟 | 耦合系统, 多变量PDE, 反应扩散 |
-| 4️⃣ | **复杂几何域** | `complex_geometry.ipynb` | ⭐⭐⭐⭐ | 45分钟 | 不规则域, CSG几何 |
-| 5️⃣ | **逆问题求解** | `inverse_problems.ipynb` | ⭐⭐⭐⭐⭐ | 90分钟 | 参数反演, 数据同化 |
+| 4️⃣ | **NS方程基础** | [`ns_equations_basic.ipynb`](ns_equations_basic.ipynb) | ⭐⭐⭐⭐ | 75分钟 | Navier-Stokes, 流体力学, 腔体流动 |
+| 5️⃣ | **NS方程进阶** | [`ns_equations_advanced.ipynb`](ns_equations_advanced.ipynb) | ⭐⭐⭐⭐⭐ | 90分钟 | 复杂边界, 高雷诺数, 管道流动 |
+<!-- | 6️⃣ | **复杂几何域** | `complex_geometry.ipynb` | ⭐⭐⭐⭐ | 45分钟 | 不规则域, CSG几何 |
+| 7️⃣ | **逆问题求解** | `inverse_problems.ipynb` | ⭐⭐⭐⭐⭐ | 90分钟 | 参数反演, 数据同化 | -->
 
 ---
 
@@ -64,21 +66,21 @@ jupyter notebook
 
 ### 🌟 初学者路径 (2-3周)
 ```
-Week 1: Tutorial 1 (1D Poisson) 
-        → 理解PINN基础概念
+Week 1: Tutorial 1-2 (1D Poisson + 2D Heat) 
+        → 理解PINN基础概念和时空问题
         
-Week 2: Tutorial 2 (2D Heat)
-        → 掌握时空问题处理
+Week 2: Tutorial 3-4 (PDE系统 + NS基础)
+        → 掌握多变量耦合和流体力学基础
         
-Week 3: 复习 + 实践项目
-        → 选择感兴趣的物理问题
+Week 3: 复习 + NS进阶学习
+        → 深入复杂流动问题
 ```
 
 ### 🔥 进阶路径 (4-6周)
 ```
-Week 1-2: Tutorial 1-2 (基础)
-Week 3-4: Tutorial 3-4 (高级)  
-Week 5-6: Tutorial 5 + 项目实战
+Week 1-2: Tutorial 1-3 (基础铺垫)
+Week 3-4: Tutorial 4-5 (NS方程系列)  
+Week 5-6: Tutorial 6-7 + 项目实战
 ```
 
 ### ⚡ 快速上手 (1周)
@@ -144,7 +146,140 @@ Day 5-7: 选择应用场景实战
 ✅ 复杂系统的可视化技巧
 ```
 
-### Tutorial 4: Complex Geometry (计划中)
+### Tutorial 4: NS Equations Basic
+```python
+# 你将掌握：
+✅ Navier-Stokes方程的物理意义和数学表述
+✅ 不可压缩流体的基本假设和简化
+✅ 腔体驱动流动的经典CFD问题
+✅ 流体速度、压力、涡量场的分析
+✅ 雷诺数对流动特性的影响
+```
+
+### Tutorial 5: NS Equations Advanced
+```python
+# 你将精通：
+✅ 复杂边界条件的数学建模和数值处理
+✅ 高雷诺数流动的强非线性特征
+✅ 瞬态流动的发展过程和稳态特性
+✅ 入流、出流和壁面边界的精确处理
+✅ 管道流动的理论解与数值解对比
+✅ 分阶段训练和自适应采样策略
+```
+
+### Tutorial 6: Complex Geometry (计划中)
+
+---
+
+## 🌊 Navier-Stokes方程专题系列
+
+### 📚 系列概述
+
+Navier-Stokes方程是流体力学的核心，描述了粘性流体的运动规律。本系列教程从基础到进阶，系统讲解如何使用PINN求解NS方程。
+
+```mermaid
+graph LR
+    A[NS基础<br/>腔体流动<br/>Re=100] --> B[NS进阶<br/>管道流动<br/>Re=400]
+    B --> C[复杂几何<br/>圆柱绕流<br/>Re=200]
+    C --> D[湍流建模<br/>RANS方程<br/>Re>1000]
+    D --> E[多物理场<br/>传热流动<br/>耦合求解]
+```
+
+### 🎯 学习递进路径
+
+| 教程 | 物理现象 | 数学复杂度 | 数值挑战 | 应用价值 |
+|------|----------|------------|----------|----------|
+| **NS基础** | 腔体驱动流 | ⭐⭐⭐ | ⭐⭐⭐ | CFD入门经典 |
+| **NS进阶** | 管道流动 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | 工程流动基础 |
+| **复杂几何** | 圆柱绕流 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | 钝体绕流 |
+| **湍流建模** | 高Re湍流 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | 工程湍流 |
+
+### 🔬 核心知识体系
+
+**数学基础**
+- 不可压缩NS方程组的推导和物理意义
+- 边界条件类型：Dirichlet, Neumann, Robin
+- 无量纲化和相似性分析
+- 雷诺数的物理意义和流动分类
+
+**数值方法**
+- PINN的数学原理和实现细节
+- 损失函数设计和权重平衡策略
+- 分阶段训练和自适应采样
+- 多尺度网络架构和物理约束
+
+**流体力学**
+- 层流、过渡流和湍流的特征
+- 边界层理论和分离流动
+- 涡量动力学和流动结构
+- 压力驱动流和剪切驱动流
+
+### 💡 实用技巧汇总
+
+**建模技巧**
+```python
+# 1. 合理的无量纲化
+Re = U * L / nu
+x_star = x / L
+u_star = u / U
+p_star = p / (rho * U^2)
+
+# 2. 边界条件的数值处理
+bc_wall = dde.DirichletBC(geom, lambda x: 0, boundary_wall)
+bc_inlet = dde.DirichletBC(geom, inlet_profile, boundary_inlet)
+
+# 3. 损失函数权重调整
+loss_weights = [1.0, 1.0, 10.0]  # [u_eq, v_eq, continuity]
+```
+
+**训练策略**
+```python
+# 分阶段训练
+# Stage 1: 低学习率预训练
+model.compile("adam", lr=1e-4)
+model.train(10000)
+
+# Stage 2: 标准训练
+model.compile("adam", lr=1e-3) 
+model.train(20000)
+
+# Stage 3: 精细优化
+model.compile("L-BFGS")
+model.train()
+```
+
+**验证方法**
+```python
+# 物理约束检验
+def verify_physics(model, test_points):
+    # 连续性方程验证
+    divergence = compute_divergence(model, test_points)
+    
+    # 边界条件验证
+    bc_error = check_boundary_conditions(model, test_points)
+    
+    # 理论解对比
+    theory_error = compare_with_theory(model, test_points)
+    
+    return divergence, bc_error, theory_error
+```
+
+### 🚀 进阶拓展方向
+
+1. **计算效率优化**
+   - GPU并行计算
+   - 混合精度训练
+   - 模型压缩技术
+
+2. **物理约束增强**
+   - 守恒律自动满足
+   - 对称性嵌入
+   - 多尺度建模
+
+3. **工程应用扩展**
+   - 优化设计问题
+   - 实时流动预测
+   - 数字孪生技术
 
 ---
 
