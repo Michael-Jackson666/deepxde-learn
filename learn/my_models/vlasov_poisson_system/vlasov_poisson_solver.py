@@ -1,624 +1,472 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Vlasov-Poisson方程组求解器
-使用DeepXDE求解6维Vlasov-Poisson系统
+更正确的 1D1V Vlasov–Poisson (VP) 系统 PINN 求解器
 
-Vlasov方程 (6D相空间):
-∂f/∂t + v·∇_x f + q/m E·∇_v f = 0
+思路：采用“离散速度节点”的网络输出设计，将速度维用 Nv 个固定节点离散，
+网络仅以 (x, t) 为输入，输出 [f(x, v_0, t), ..., f(x, v_{Nv-1}, t), phi(x,t)] 共 Nv+1 个通道。
 
-Poisson方程:
-∇²φ = -ρ/ε₀ = -q/ε₀ ∫ f dv
+优点：
+- 便于在残差中实现速度积分 ρ(x,t) ≈ \sum w_i f(x,v_i,t) 和速度导数 ∂f/∂v 的有限差分离散；
+- 易于在 DeepXDE 的残差函数中封装完整的方程、初始条件与周期边界条件。
 
-其中 E = -∇φ
+方程 (无量纲常用形式)：
+- Vlasov:    ∂f/∂t + v ∂f/∂x + E ∂f/∂v = 0,  其中 E(x,t) = -∂phi/∂x
+- Poisson:   ∂²phi/∂x² = 1 - ∫ f dv ≈ 1 - \sum_i w_i f_i
 
-作者：DeepXDE Tutorial  
-日期：2025年9月30日
+残差包含：
+- 方程残差：对每个速度节点的 Vlasov 残差，以及 Poisson 残差
+- 初始条件：t=0 时 f(x,v_i,0)（Maxwellian+扰动），phi(x,0)（与扰动一致或取 0）
+- 边界条件：x 方向周期边界（对所有 f_i 与 phi 应用 PeriodicBC）
+
+注意：
+- 速度边界（v_min, v_max）处的 ∂f/∂v 使用一侧差分；若需要更强约束，可额外给 f_i 添加先验衰减 IC/BC。
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 import deepxde as dde
-import time
-from scipy.integrate import quad
 
 
-class VlasovPoissonSolver:
-    """Vlasov-Poisson方程组求解器"""
-    
-    def __init__(self, 
-                 x_domain=(-1.0, 1.0), 
-                 v_domain=(-3.0, 3.0), 
-                 time_domain=(0.0, 1.0),
-                 q_over_m=1.0, 
-                 epsilon_0=1.0,
-                 case="landau_damping"):
-        """
-        初始化Vlasov-Poisson求解器
-        
-        Args:
-            x_domain (tuple): 空间域范围 (x_min, x_max)
-            v_domain (tuple): 速度域范围 (v_min, v_max)  
-            time_domain (tuple): 时间域范围 (t_min, t_max)
-            q_over_m (float): 电荷质量比 q/m
-            epsilon_0 (float): 真空介电常数
-            case (str): 预设案例 ("landau_damping", "two_stream", "bump_on_tail")
-        """
+class VP1D1VDiscreteV:
+    """1D1V Vlasov–Poisson PINN（离散速度）"""
+
+    def __init__(
+        self,
+        x_domain=(-np.pi, np.pi),
+        t_domain=(0.0, 10.0),
+        v_domain=(-6.0, 6.0),
+        num_velocity_nodes=24,
+        amplitude=0.01,
+        k_mode=1.0,
+        neutral_density=1.0,
+        use_gl_quadrature=True,
+        seed=42,
+    ):
         self.x_min, self.x_max = x_domain
-        self.v_min, self.v_max = v_domain  
-        self.t_min, self.t_max = time_domain
-        self.q_over_m = q_over_m
-        self.epsilon_0 = epsilon_0
-        self.case = case
-        
-        # 设置随机种子
-        np.random.seed(42)
-        dde.config.set_random_seed(42)
-        
-        print(f"⚡ Vlasov-Poisson方程组求解器")
-        print(f"相空间维度: 6D (x, v, t)")
-        print(f"空间域: [{self.x_min}, {self.x_max}]")
-        print(f"速度域: [{self.v_min}, {self.v_max}]")
-        print(f"时间域: [{self.t_min}, {self.t_max}]")
-        print(f"求解案例: {case}")
-        
-        # 根据案例设置特定参数
-        self._setup_case_parameters()
-    
-    def _setup_case_parameters(self):
-        """根据选择的案例设置参数"""
-        if self.case == "landau_damping":
-            self.amplitude = 0.01  # 扰动幅度
-            self.k_mode = 0.5      # 波数
-            self.v_thermal = 1.0   # 热速度
-            print(f"📊 Landau阻尼案例: k={self.k_mode}, 扰动幅度={self.amplitude}")
-            
-        elif self.case == "two_stream":
-            self.v_beam1 = 1.0     # 第一束流速度
-            self.v_beam2 = -1.0    # 第二束流速度  
-            self.beam_density = 0.1 # 束流密度比
-            print(f"🌊 双流不稳定性案例: v1={self.v_beam1}, v2={self.v_beam2}")
-            
-        elif self.case == "bump_on_tail":
-            self.v_bump = 3.0      # 尾部速度
-            self.bump_amplitude = 0.1  # 尾部幅度
-            print(f"📈 Bump-on-tail案例: v_bump={self.v_bump}")
-    
-    def vlasov_pde(self, inputs, outputs):
-        """
-        定义Vlasov方程的PDE残差
-        
-        Args:
-            inputs: [x, v, t] (N, 3) - 相空间坐标
-            outputs: [f, φ] (N, 2) - 分布函数和电势
-            
-        Returns:
-            vlasov_residual (N, 1)
-        """
-        x, v, t = inputs[:, 0:1], inputs[:, 1:2], inputs[:, 2:3]
-        f = outputs[:, 0:1]  # 分布函数
-        phi = outputs[:, 1:2]  # 电势
-        
-        # 计算分布函数f的各种偏导数
-        df_dt = dde.grad.jacobian(outputs, inputs, i=0, j=2)  # ∂f/∂t
-        df_dx = dde.grad.jacobian(outputs, inputs, i=0, j=0)  # ∂f/∂x
-        df_dv = dde.grad.jacobian(outputs, inputs, i=0, j=1)  # ∂f/∂v
-        
-        # 计算电场 E = -∂φ/∂x
-        E = -dde.grad.jacobian(outputs, inputs, i=1, j=0)     # E = -∂φ/∂x
-        
-        # Vlasov方程: ∂f/∂t + v·∂f/∂x + (q/m)E·∂f/∂v = 0
-        vlasov_residual = df_dt + v * df_dx + self.q_over_m * E * df_dv
-        
-        return vlasov_residual
-    
-    def poisson_pde(self, inputs, outputs):
-        """
-        定义Poisson方程的PDE残差
-        
-        Args:
-            inputs: [x, v, t] (N, 3)
-            outputs: [f, φ] (N, 2)
-            
-        Returns:
-            poisson_residual (N, 1)
-        """
-        x, v, t = inputs[:, 0:1], inputs[:, 1:2], inputs[:, 2:3]
-        f = outputs[:, 0:1]
-        phi = outputs[:, 1:2]
-        
-        # 计算电势的二阶导数 ∂²φ/∂x²
-        d2phi_dx2 = dde.grad.hessian(outputs, inputs, component=1, i=0, j=0)
-        
-        # 计算电荷密度 ρ = q ∫ f dv (近似)
-        # 注意：这里是简化处理，实际需要在速度方向积分
-        rho = self.q_over_m * f  # 简化：假设速度积分已经包含在f中
-        
-        # Poisson方程: ∇²φ = -ρ/ε₀
-        poisson_residual = d2phi_dx2 + rho / self.epsilon_0
-        
-        return poisson_residual
-    
-    def combined_pde(self, inputs, outputs):
-        """
-        组合的PDE系统
-        
-        Returns:
-            [vlasov_residual, poisson_residual] (N, 2)
-        """
-        vlasov_res = self.vlasov_pde(inputs, outputs)
-        poisson_res = self.poisson_pde(inputs, outputs)
-        
-        return [vlasov_res, poisson_res]
-    
-    def initial_condition_f(self, inputs):
-        """
-        分布函数f的初始条件
-        """
-        x, v, t = inputs[:, 0:1], inputs[:, 1:2], inputs[:, 2:3]
-        
-        if self.case == "landau_damping":
-            # Maxwellian背景 + 小扰动
-            # f₀(x,v) = (1/√(2π)σ) exp(-v²/(2σ²)) * (1 + A cos(kx))
-            sigma = self.v_thermal
-            maxwellian = (1.0 / np.sqrt(2 * np.pi * sigma**2)) * np.exp(-v**2 / (2 * sigma**2))
-            perturbation = 1.0 + self.amplitude * np.cos(self.k_mode * np.pi * x)
-            return maxwellian * perturbation
-            
-        elif self.case == "two_stream":
-            # 双Maxwellian分布
-            sigma = 0.5
-            beam1 = np.exp(-(v - self.v_beam1)**2 / (2 * sigma**2))
-            beam2 = np.exp(-(v - self.v_beam2)**2 / (2 * sigma**2))
-            normalization = 1.0 / np.sqrt(2 * np.pi * sigma**2)
-            return normalization * (beam1 + self.beam_density * beam2)
-            
-        elif self.case == "bump_on_tail":
-            # Maxwellian主体 + 高能尾部
-            sigma_main = 1.0
-            sigma_tail = 0.3
-            main_dist = np.exp(-v**2 / (2 * sigma_main**2))
-            tail_dist = self.bump_amplitude * np.exp(-(v - self.v_bump)**2 / (2 * sigma_tail**2))
-            normalization = 1.0 / np.sqrt(2 * np.pi)
-            return normalization * (main_dist + tail_dist)
-            
+        self.t_min, self.t_max = t_domain
+        self.v_min, self.v_max = v_domain
+        self.Nv = int(num_velocity_nodes)
+        self.amplitude = float(amplitude)
+        self.k = float(k_mode)
+        self.n0 = float(neutral_density)
+        self.use_gl_quadrature = bool(use_gl_quadrature)
+
+        np.random.seed(seed)
+        dde.config.set_random_seed(seed)
+
+        # 速度节点与权重（用于速度积分与 ∂/∂v 有限差分）
+        if self.use_gl_quadrature:
+            # Gauss–Legendre 节点/权重（[-1,1] 映射到 [v_min, v_max]）
+            xi, wi = np.polynomial.legendre.leggauss(self.Nv)
+            self.v_nodes = 0.5 * (self.v_max - self.v_min) * xi + 0.5 * (self.v_max + self.v_min)
+            self.v_weights = 0.5 * (self.v_max - self.v_min) * wi
         else:
-            # 默认：简单Maxwellian
-            return (1.0 / np.sqrt(2 * np.pi)) * np.exp(-v**2 / 2.0)
-    
-    def initial_condition_phi(self, inputs):
+            self.v_nodes = np.linspace(self.v_min, self.v_max, self.Nv)
+            dv = (self.v_max - self.v_min) / (self.Nv - 1)
+            self.v_weights = np.full(self.Nv, dv)
+
+        # 预先计算每个节点的“局部 dv”用于一侧/中心差分
+        self.dv_nodes = np.empty(self.Nv)
+        self.dv_nodes[0] = self.v_nodes[1] - self.v_nodes[0]
+        self.dv_nodes[-1] = self.v_nodes[-1] - self.v_nodes[-2]
+        self.dv_nodes[1:-1] = (self.v_nodes[2:] - self.v_nodes[:-2]) / 2.0
+
+        # 构造几何与时间域
+        self.geom = dde.geometry.Interval(self.x_min, self.x_max)
+        self.timedomain = dde.geometry.TimeDomain(self.t_min, self.t_max)
+        self.geomtime = dde.geometry.GeometryXTime(self.geom, self.timedomain)
+
+        # 占位：DeepXDE 网络、数据与模型
+        self.net = None
+        self.data = None
+        self.model = None
+
+    # ----------------------------- 物理先验 ------------------------------
+    def maxwellian(self, v, vt=1.0):
+        return (1.0 / np.sqrt(2.0 * np.pi) / vt) * np.exp(-0.5 * (v / vt) ** 2)
+
+    def f0(self, x, v):
+        # Landau damping: Maxwellian + 小扰动 cos(kx)
+        base = self.maxwellian(v, vt=1.0)
+        return base * (1.0 + self.amplitude * np.cos(self.k * x))
+
+    def phi0(self, x):
+        # 初始电势，可取 0 或与密度扰动相容的解析近似
+        return np.zeros_like(x)
+
+    # ------------------------------ PDE 残差 ------------------------------
+    def pde_system(self, xin, yout):
         """
-        电势φ的初始条件
+        残差输出形状为 (N, Nv+1)：
+        - 前 Nv 列：每个速度节点的 Vlasov 残差
+        - 最后一列：Poisson 残差
         """
-        x, v, t = inputs[:, 0:1], inputs[:, 1:2], inputs[:, 2:3]
-        
-        if self.case == "landau_damping":
-            # 与密度扰动对应的电势扰动
-            return self.amplitude * np.sin(self.k_mode * np.pi * x) / (self.k_mode * np.pi)**2
-        else:
-            # 其他情况：初始电势为零
-            return np.zeros_like(x)
-    
-    def setup_geometry_and_conditions(self):
-        """设置几何域和边界/初始条件"""
-        # 定义3D相空间域 (x, v, t)
-        x_domain = dde.geometry.Interval(self.x_min, self.x_max)
-        v_domain = dde.geometry.Interval(self.v_min, self.v_max)
-        time_domain = dde.geometry.TimeDomain(self.t_min, self.t_max)
-        
-        # 创建相空间域 (x, v) × t
-        phase_space = dde.geometry.geometry_nd.Hypercube([self.x_min, self.v_min], 
-                                                        [self.x_max, self.v_max])
-        self.geomtime = dde.geometry.GeometryXTime(phase_space, time_domain)
-        
-        # 边界条件：周期性边界条件 (for x direction)
-        def boundary_x_left(inputs, on_boundary):
-            return on_boundary and np.isclose(inputs[0], self.x_min)
-        
-        def boundary_x_right(inputs, on_boundary):
-            return on_boundary and np.isclose(inputs[0], self.x_max)
-        
-        def boundary_v_left(inputs, on_boundary):
-            return on_boundary and np.isclose(inputs[1], self.v_min)
-        
-        def boundary_v_right(inputs, on_boundary):
-            return on_boundary and np.isclose(inputs[1], self.v_max)
-        
-        # 简化边界条件：零边界
-        def zero_bc_f(inputs):
-            return np.zeros((len(inputs), 1))
-        
-        def zero_bc_phi(inputs):
-            return np.zeros((len(inputs), 1))
-        
-        # 创建边界条件
-        self.bcs = [
-            dde.icbc.DirichletBC(self.geomtime, zero_bc_f, boundary_v_left, component=0),
-            dde.icbc.DirichletBC(self.geomtime, zero_bc_f, boundary_v_right, component=0),
-            dde.icbc.DirichletBC(self.geomtime, zero_bc_phi, boundary_x_left, component=1),
-            dde.icbc.DirichletBC(self.geomtime, zero_bc_phi, boundary_x_right, component=1),
-        ]
-        
-        # 初始条件
-        self.ics = [
-            dde.icbc.IC(self.geomtime, self.initial_condition_f, 
-                       lambda _, on_initial: on_initial, component=0),
-            dde.icbc.IC(self.geomtime, self.initial_condition_phi, 
-                       lambda _, on_initial: on_initial, component=1)
-        ]
-        
-        print("✅ 6D相空间域和边界/初始条件设置完成")
-    
-    def create_model(self, 
-                    num_domain=5000, 
-                    num_boundary=500, 
-                    num_initial=500,
-                    layer_sizes=[3, 100, 100, 100, 100, 2], 
-                    activation="tanh"):
-        """
-        创建神经网络模型
-        
-        Args:
-            num_domain (int): 域内采样点数
-            num_boundary (int): 边界采样点数  
-            num_initial (int): 初始条件采样点数
-            layer_sizes (list): 网络层大小 [输入3维, 隐藏层..., 输出2维]
-            activation (str): 激活函数
-        """
-        # 创建训练数据
+        # x,t 拆分
+        # inputs: (N, 2) with columns [x, t]
+        x = xin[:, 0:1]
+        t = xin[:, 1:2]
+
+        # 输出 y: (N, Nv+1) -> f_i, phi
+        phi = yout[:, self.Nv : self.Nv + 1]
+
+        # 计算空间/时间导数
+        dphi_dx = dde.grad.jacobian(yout, xin, i=self.Nv, j=0)  # ∂phi/∂x
+        d2phi_dx2 = dde.grad.hessian(yout, xin, component=self.Nv, i=0, j=0)  # ∂²phi/∂x²
+        E = -dphi_dx  # 电场 E = -∂phi/∂x
+
+        # 收集 f_i 以及其 ∂/∂x, ∂/∂t（用于 Vlasov），并构造 ∂f/∂v 的有限差分
+        # yout[:, i:i+1] 是第 i 个速度节点上的 f_i(x,t)
+        f_list = []
+        dfdx_list = []
+        dfdt_list = []
+        for i in range(self.Nv):
+            fi = yout[:, i : i + 1]
+            f_list.append(fi)
+            dfdx_list.append(dde.grad.jacobian(yout, xin, i=i, j=0))  # ∂f_i/∂x
+            dfdt_list.append(dde.grad.jacobian(yout, xin, i=i, j=1))  # ∂f_i/∂t
+
+        # 速度导数 ∂f/∂v 的离散近似：中心差分（边界用一侧差分）
+        dfdv_list = [None] * self.Nv
+        # 边界 i=0: forward difference
+        dfdv_list[0] = (f_list[1] - f_list[0]) / (self.v_nodes[1] - self.v_nodes[0])
+        # 中间点: central difference
+        for i in range(1, self.Nv - 1):
+            dfdv_list[i] = (f_list[i + 1] - f_list[i - 1]) / (
+                self.v_nodes[i + 1] - self.v_nodes[i - 1]
+            )
+        # 边界 i=Nv-1: backward difference
+        dfdv_list[-1] = (f_list[-1] - f_list[-2]) / (
+            self.v_nodes[-1] - self.v_nodes[-2]
+        )
+
+        # Vlasov 残差：ri = ∂f_i/∂t + v_i ∂f_i/∂x + E ∂f/∂v|_i
+        # E(x,t) 与每个 i 共享，形状对齐即可
+        vlasov_residuals = []
+        for i in range(self.Nv):
+            vi = self.v_nodes[i]
+            ri = dfdt_list[i] + vi * dfdx_list[i] + E * dfdv_list[i]
+            vlasov_residuals.append(ri)
+
+        # Poisson 残差：r_phi = ∂²phi/∂x² - (1 - ∑ w_i f_i)
+        # 将速度积分 ∑ w_i f_i 组合出来
+        integ = None
+        for wi, fi in zip(self.v_weights, f_list):
+            term = wi * fi
+            integ = term if integ is None else integ + term
+        poisson_residual = d2phi_dx2 - (1.0 - integ)
+
+        # 返回残差列表：DeepXDE 更推荐返回 [r1, r2, ...] 的 list
+        return vlasov_residuals + [poisson_residual]
+
+    # --------------------------- 初始与边界条件 ---------------------------
+    def _ic_f_component(self, vi):
+        # 返回用于 dde.icbc.IC 的 callable；DeepXDE 传入 (x,t)
+        def ic(x):
+            # x: (N, 2) columns [x, t]
+            xx = x[:, 0:1]
+            return self.f0(xx, vi)
+        return ic
+
+    def _ic_phi(self):
+        def ic(x):
+            xx = x[:, 0:1]
+            return self.phi0(xx)
+        return ic
+
+    def build_data(
+        self,
+        num_domain=4000,
+        num_boundary=200,
+        num_initial=800,
+        train_distribution="uniform",
+    ):
+        # 周期边界：只在 x 方向（GeometryXTime），需要提供右边界谓词
+        def boundary_r(x, on_boundary):
+            # x: [x, t]，仅当位于 x = x_max 的边界处返回 True
+            return on_boundary and dde.utils.isclose(x[0], self.x_max)
+
+        bcs = []
+        # 对 Nv 个 f_i 设置周期边界
+        for i in range(self.Nv):
+            bcs.append(dde.icbc.PeriodicBC(self.geomtime, i, boundary_r))
+        # 对 phi 设置周期边界
+        bcs.append(dde.icbc.PeriodicBC(self.geomtime, self.Nv, boundary_r))
+
+        # 初始条件：t=0
+        ics = []
+        for i in range(self.Nv):
+            ics.append(
+                dde.icbc.IC(
+                    self.geomtime,
+                    self._ic_f_component(self.v_nodes[i]),
+                    lambda _, on_initial: on_initial,
+                    component=i,
+                )
+            )
+        ics.append(
+            dde.icbc.IC(
+                self.geomtime,
+                self._ic_phi(),
+                lambda _, on_initial: on_initial,
+                component=self.Nv,
+            )
+        )
+
         self.data = dde.data.TimePDE(
             self.geomtime,
-            self.combined_pde,
-            self.bcs + self.ics,
+            self.pde_system,
+            bcs + ics,
             num_domain=num_domain,
             num_boundary=num_boundary,
             num_initial=num_initial,
-            num_test=1000
+            num_test=1000,
+            train_distribution=train_distribution,
         )
-        
-        # 构建神经网络 (输入3维: x,v,t; 输出2维: f,φ)
+
+    def build_network(self, hidden_sizes=(128, 128, 128, 128), activation="tanh"):
+        # 输入 2 维 (x,t)，输出 Nv+1 维（Nv 个 f_i + 1 个 phi）
+        layer_sizes = [2] + list(hidden_sizes) + [self.Nv + 1]
         self.net = dde.nn.FNN(layer_sizes, activation, "Glorot uniform")
-        
-        # 创建模型
+
+    def build_model(self):
+        assert self.data is not None and self.net is not None
         self.model = dde.Model(self.data, self.net)
-        
-        print("🧠 Vlasov-Poisson神经网络模型创建完成")
-        print(f"网络结构: {layer_sizes}")
-        print(f"相空间采样点数: {num_domain}")
-        print(f"边界采样点数: {num_boundary}")
-        print(f"初始采样点数: {num_initial}")
-        
-        # 估算参数数量
-        total_params = sum([layer_sizes[i] * layer_sizes[i+1] + layer_sizes[i+1] 
-                           for i in range(len(layer_sizes)-1)])
-        print(f"估计网络参数: ~{total_params:,}")
-    
-    def train(self, 
-              adam_iterations=10000, 
-              adam_lr=0.001, 
-              use_lbfgs=True,
-              weights_pde=[1.0, 1.0]):  # [vlasov_weight, poisson_weight]
-        """
-        训练模型
-        
-        Args:
-            adam_iterations (int): Adam优化器迭代次数
-            adam_lr (float): Adam学习率
-            use_lbfgs (bool): 是否使用L-BFGS精细调优
-            weights_pde (list): PDE方程权重 [Vlasov权重, Poisson权重]
-        """
-        print("🚀 开始训练Vlasov-Poisson系统...")
-        print("⚠️  注意：6D系统计算极其复杂，请耐心等待...")
-        
-        # 第一阶段：Adam训练
-        self.model.compile(
-            optimizer="adam", 
-            lr=adam_lr, 
-            metrics=["l2 relative error"],
-            loss_weights=weights_pde  # 设置方程权重
-        )
-        
-        start_time = time.time()
-        self.losshistory, self.train_state = self.model.train(iterations=adam_iterations)
-        train_time = time.time() - start_time
-        
-        print(f"📊 Adam训练完成！ 用时: {train_time:.1f}秒")
-        print(f"最终训练损失: {self.train_state.loss_train:.6f}")
-        print(f"最终测试损失: {self.train_state.loss_test:.6f}")
-        
-        # 第二阶段：L-BFGS精细调优
+
+    # --------------------------------- 训练 ---------------------------------
+    def train(self, adam_iters=15000, adam_lr=1e-3, use_lbfgs=False):
+        # 训练信息美化回调
+        class PrettyLogger(dde.callbacks.Callback):
+            def __init__(self):
+                super().__init__()
+                self.best = np.inf
+            @staticmethod
+            def _to_scalar_loss(loss_val):
+                import numpy as _np
+                # DeepXDE 可能返回：标量、ndarray、由分项损失组成的 list/tuple
+                if isinstance(loss_val, (list, tuple)):
+                    total = 0.0
+                    for item in loss_val:
+                        total += PrettyLogger._to_scalar_loss(item)
+                    return float(total)
+                if isinstance(loss_val, _np.ndarray):
+                    if loss_val.ndim == 0:
+                        return float(loss_val)
+                    return float(_np.sum(loss_val))
+                try:
+                    return float(loss_val)
+                except Exception:
+                    return float(_np.array(loss_val).sum())
+            def on_train_begin(self):
+                print("\n================ 训练开始 ================")
+                print(f"优化器: Adam  学习率: {adam_lr}")
+                print(f"Adam迭代: {adam_iters}  是否LBFGS: {use_lbfgs}")
+                print("========================================\n")
+            def on_epoch_end(self):
+                step = self.model.train_state.step
+                loss_list = self.model.train_state.loss_train
+                loss = PrettyLogger._to_scalar_loss(loss_list)
+                if loss < self.best:
+                    self.best = loss
+                if step % max(1, adam_iters // 50) == 0 or step == 1:
+                    bar_len = 30
+                    prog = min(1.0, step / max(1, adam_iters))
+                    filled = int(bar_len * prog)
+                    bar = "█" * filled + "·" * (bar_len - filled)
+                    print(f"Step {step:6d} | Loss {loss:9.3e} | Best {self.best:9.3e} | {bar} {prog*100:5.1f}%")
+            def on_train_end(self):
+                print("\n=============== Adam 完成 ===============\n")
+
+        self.model.compile(optimizer="adam", lr=adam_lr)
+        losshistory, train_state = self.model.train(iterations=adam_iters, callbacks=[PrettyLogger()])
         if use_lbfgs:
-            print("\n🔧 开始L-BFGS精细调优...")
             self.model.compile("L-BFGS")
-            self.losshistory, self.train_state = self.model.train()
-            
-            print("🎉 L-BFGS训练完成！")
-            print(f"最终训练损失: {self.train_state.loss_train:.6f}")
-            print(f"最终测试损失: {self.train_state.loss_test:.6f}")
-    
-    def predict(self, inputs):
-        """
-        预测给定相空间点的分布函数和电势
-        
-        Args:
-            inputs: [x, v, t] 坐标 (N, 3)
-            
-        Returns:
-            [f, φ] 预测值 (N, 2)
-        """
-        return self.model.predict(inputs)
-    
-    def compute_macroscopic_quantities(self, x_points, t, v_resolution=50):
-        """
-        计算宏观量：密度、平均速度、温度等
-        
-        Args:
-            x_points (array): 空间点
-            t (float): 时间点
-            v_resolution (int): 速度积分分辨率
-            
-        Returns:
-            dict: 包含各种宏观量的字典
-        """
-        v_points = np.linspace(self.v_min, self.v_max, v_resolution)
-        dv = (self.v_max - self.v_min) / (v_resolution - 1)
-        
-        densities = []
-        mean_velocities = []
-        temperatures = []
-        
-        for x in x_points:
-            # 创建相空间点 (x, v, t)
-            phase_points = np.array([[x, v, t] for v in v_points])
-            
-            # 预测分布函数
-            predictions = self.predict(phase_points)
-            f_values = predictions[:, 0]  # 分布函数
-            
-            # 计算密度 n = ∫ f dv
-            density = np.trapz(f_values, v_points)
-            densities.append(density)
-            
-            # 计算平均速度 <v> = ∫ v f dv / n
-            if density > 1e-10:  # 避免除零
-                mean_v = np.trapz(v_points * f_values, v_points) / density
-                mean_velocities.append(mean_v)
-                
-                # 计算温度 T ∝ ∫ (v - <v>)² f dv / n
-                temp = np.trapz((v_points - mean_v)**2 * f_values, v_points) / density
-                temperatures.append(temp)
-            else:
-                mean_velocities.append(0.0)
-                temperatures.append(0.0)
-        
-        return {
-            'density': np.array(densities),
-            'mean_velocity': np.array(mean_velocities),
-            'temperature': np.array(temperatures)
-        }
-    
-    def visualize_initial_conditions(self, resolution=50):
-        """可视化初始条件"""
-        x_points = np.linspace(self.x_min, self.x_max, resolution)
-        v_points = np.linspace(self.v_min, self.v_max, resolution)
-        X, V = np.meshgrid(x_points, v_points)
-        
-        # 创建初始时刻的相空间点
-        phase_points = np.stack([X.flatten(), V.flatten(), 
-                                np.zeros_like(X.flatten())], axis=1)
-        
-        # 计算初始分布
-        f_init = self.initial_condition_f(phase_points).reshape(X.shape)
-        phi_init = self.initial_condition_phi(phase_points).reshape(X.shape)
-        
-        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-        
-        # 绘制初始分布函数
-        im1 = axes[0].contourf(X, V, f_init, levels=20, cmap='viridis')
-        axes[0].set_xlabel('位置 x')
-        axes[0].set_ylabel('速度 v')
-        axes[0].set_title(f'初始分布函数 f(x,v,0) - {self.case}')
-        plt.colorbar(im1, ax=axes[0])
-        
-        # 绘制初始电势 (沿x方向的平均)
-        phi_x = np.mean(phi_init, axis=0)  # 对速度维度求平均
-        axes[1].plot(x_points, phi_x, 'b-', linewidth=2)
-        axes[1].set_xlabel('位置 x')
-        axes[1].set_ylabel('电势 φ')
-        axes[1].set_title('初始电势 φ(x,0)')
-        axes[1].grid(True, alpha=0.3)
-        
+            print("开始 L-BFGS 微调...")
+            losshistory, train_state = self.model.train()
+            print("L-BFGS 完成。")
+        return losshistory, train_state
+
+    # --------------------------------- 预测 ---------------------------------
+    def predict_f_phi(self, x, t):
+        """返回 f(x, v_i, t) (Nv,) 与 phi(x,t) 标量。"""
+        pts = np.array([[x, t]], dtype=float)
+        out = self.model.predict(pts).reshape(-1)
+        f_vals = out[: self.Nv]
+        phi = out[self.Nv]
+        return f_vals, phi
+
+
+def quick_run():
+    # 基本配置（Landau damping）
+    solver = VP1D1VDiscreteV(
+        x_domain=(-np.pi, np.pi),
+        t_domain=(0.0, 2.0),
+        v_domain=(-6.0, 6.0),
+        num_velocity_nodes=24,
+        amplitude=0.05,
+        k_mode=1.0,
+        neutral_density=1.0,
+        use_gl_quadrature=True,
+    )
+
+    solver.build_data(
+        num_domain=6000,
+        num_boundary=400,
+        num_initial=800,
+        train_distribution="uniform",
+    )
+    solver.build_network(hidden_sizes=(128, 128, 128, 128), activation="tanh")
+    solver.build_model()
+
+    print(
+        f"构建完成：Nv={solver.Nv}, x∈[{solver.x_min},{solver.x_max}], t∈[{solver.t_min},{solver.t_max}], v∈[{solver.v_min},{solver.v_max}]"
+    )
+
+    # 允许通过环境变量或此处参数自定义迭代次数
+    adam_iters = 800
+    losshistory, train_state = solver.train(adam_iters=adam_iters, adam_lr=8e-4, use_lbfgs=False)
+
+    # 简单检查：提取一个点的 f 与 phi
+    f_vals, phi_val = solver.predict_f_phi(x=0.0, t=0.0)
+    print(f"样例预测：phi(0,0)≈{phi_val:.4e}，f(x=0,t=0) 的均值≈{np.mean(f_vals):.4e}")
+
+    # 可视化：
+    # 1) t 固定时的 phi(x,t)
+    x_plot = np.linspace(solver.x_min, solver.x_max, 200)
+    t_show = [0.0, (solver.t_min + solver.t_max) * 0.5, solver.t_max]
+    plt.figure(figsize=(8, 4))
+    for ts in t_show:
+        pts = np.column_stack([x_plot, np.full_like(x_plot, ts)])
+        out = solver.model.predict(pts)
+        phi = out[:, solver.Nv]
+        plt.plot(x_plot, phi, label=f"t={ts:.2f}")
+    plt.title("电势 phi(x,t)")
+    plt.xlabel("x")
+    plt.ylabel("phi")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # 2) 给定时间切片下的 f(x,v,t) 热力图
+    nx, nv = 128, solver.Nv
+    x_grid = np.linspace(solver.x_min, solver.x_max, nx)
+    t_slice = min(solver.t_max, 0.8 * solver.t_max)
+    F = np.zeros((nv, nx))
+    for j, x0 in enumerate(x_grid):
+        pts = np.array([[x0, t_slice]])
+        out = solver.model.predict(pts).reshape(-1)
+        F[:, j] = out[: solver.Nv]
+    plt.figure(figsize=(8, 4))
+    extent = [solver.x_min, solver.x_max, solver.v_min, solver.v_max]
+    plt.imshow(F, aspect="auto", origin="lower", extent=extent, cmap="viridis")
+    plt.colorbar(label="f(x,v,t)")
+    plt.xlabel("x")
+    plt.ylabel("v (离散节点)")
+    plt.title(f"f(x,v,t) @ t={t_slice:.2f}")
+    plt.tight_layout()
+    plt.show()
+
+    # 3) 训练损失曲线
+    if hasattr(losshistory, "loss_train"):
+        plt.figure(figsize=(6, 4))
+        lt = losshistory.loss_train
+        if isinstance(lt, (list, tuple)) and len(lt) and isinstance(lt[0], (list, tuple)):
+            lt = [sum(x) for x in lt]
+        plt.semilogy(lt, label="train")
+        if getattr(losshistory, "loss_test", None) is not None:
+            plt.semilogy(losshistory.loss_test, label="test")
+        plt.xlabel("iteration")
+        plt.ylabel("loss")
+        plt.title("Training Loss")
+        plt.legend()
         plt.tight_layout()
         plt.show()
-    
-    def visualize_phase_space_evolution(self, times=None, resolution=40):
-        """
-        可视化相空间演化
-        
-        Args:
-            times (list): 可视化的时间点
-            resolution (int): 相空间分辨率
-        """
-        if times is None:
-            times = [0.0, 0.3, 0.6, 1.0]
-        
-        x_points = np.linspace(self.x_min, self.x_max, resolution)
-        v_points = np.linspace(self.v_min, self.v_max, resolution)
-        X, V = np.meshgrid(x_points, v_points)
-        
-        fig, axes = plt.subplots(2, len(times), figsize=(5*len(times), 10))
-        
-        for i, t in enumerate(times):
-            # 创建相空间点
-            phase_points = np.stack([X.flatten(), V.flatten(), 
-                                   np.full_like(X.flatten(), t)], axis=1)
-            
-            # 预测分布函数和电势
-            predictions = self.predict(phase_points)
-            f_pred = predictions[:, 0].reshape(X.shape)
-            phi_pred = predictions[:, 1].reshape(X.shape)
-            
-            # 绘制分布函数
-            im1 = axes[0, i].contourf(X, V, f_pred, levels=20, cmap='viridis')
-            axes[0, i].set_xlabel('位置 x')
-            if i == 0:
-                axes[0, i].set_ylabel('速度 v')
-            axes[0, i].set_title(f'分布函数 f(x,v) at t={t:.1f}')
-            plt.colorbar(im1, ax=axes[0, i])
-            
-            # 绘制电势 (沿x的平均值)
-            phi_x = np.mean(phi_pred, axis=0)
-            axes[1, i].plot(x_points, phi_x, 'r-', linewidth=2)
-            axes[1, i].set_xlabel('位置 x')
-            if i == 0:
-                axes[1, i].set_ylabel('电势 φ')
-            axes[1, i].set_title(f'电势 φ(x) at t={t:.1f}')
-            axes[1, i].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.show()
-    
-    def analyze_plasma_dynamics(self, x_resolution=30, time_points=20):
-        """分析等离子体动力学演化"""
-        x_points = np.linspace(self.x_min, self.x_max, x_resolution)
-        times = np.linspace(self.t_min, self.t_max, time_points)
-        
-        # 计算时空演化的宏观量
-        density_evolution = []
-        electric_field_evolution = []
-        
-        for t in times:
-            # 计算宏观量
-            macro_quantities = self.compute_macroscopic_quantities(x_points, t)
-            density_evolution.append(macro_quantities['density'])
-            
-            # 计算电场 (简化：对中心x点)
-            x_center = (self.x_min + self.x_max) / 2
-            v_center = (self.v_min + self.v_max) / 2
-            
-            # 计算电场：E = -∂φ/∂x
-            dx = 0.01
-            phi_left = self.predict(np.array([[x_center - dx, v_center, t]]))[0, 1]
-            phi_right = self.predict(np.array([[x_center + dx, v_center, t]]))[0, 1]
-            E_field = -(phi_right - phi_left) / (2 * dx)
-            electric_field_evolution.append(E_field)
-        
-        density_evolution = np.array(density_evolution)
-        
-        # 可视化分析结果
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        
-        # 1. 训练历史
-        axes[0, 0].semilogy(self.losshistory.steps, self.losshistory.loss_train, 
-                           'b-', label='训练损失')
-        axes[0, 0].semilogy(self.losshistory.steps, self.losshistory.loss_test, 
-                           'r--', label='测试损失')
-        axes[0, 0].set_xlabel('训练步数')
-        axes[0, 0].set_ylabel('损失')
-        axes[0, 0].set_title('训练历史')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True, alpha=0.3)
-        
-        # 2. 密度时空演化
-        T_mesh, X_mesh = np.meshgrid(times, x_points)
-        im2 = axes[0, 1].contourf(T_mesh, X_mesh, density_evolution.T, 
-                                 levels=20, cmap='plasma')
-        axes[0, 1].set_xlabel('时间 t')
-        axes[0, 1].set_ylabel('位置 x')
-        axes[0, 1].set_title('密度演化 n(x,t)')
-        plt.colorbar(im2, ax=axes[0, 1])
-        
-        # 3. 电场时间演化
-        axes[1, 0].plot(times, electric_field_evolution, 'g-', linewidth=2)
-        axes[1, 0].set_xlabel('时间 t')
-        axes[1, 0].set_ylabel('电场 E')
-        axes[1, 0].set_title('中心电场演化')
-        axes[1, 0].grid(True, alpha=0.3)
-        
-        # 4. 密度中心点时间演化
-        x_center_idx = len(x_points) // 2
-        density_center = density_evolution[:, x_center_idx]
-        axes[1, 1].plot(times, density_center, 'purple', linewidth=2)
-        axes[1, 1].set_xlabel('时间 t')
-        axes[1, 1].set_ylabel('密度 n')
-        axes[1, 1].set_title('中心密度演化')
-        axes[1, 1].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.show()
-        
-        print("📊 等离子体动力学分析:")
-        print(f"最大密度变化: {np.max(density_center) - np.min(density_center):.6f}")
-        print(f"最大电场: {np.max(np.abs(electric_field_evolution)):.6f}")
-        
-        if self.case == "landau_damping":
-            # 计算Landau阻尼率
-            mid_idx = len(times) // 2
-            if len(electric_field_evolution) > mid_idx:
-                damping_rate = -np.log(abs(electric_field_evolution[mid_idx]) / 
-                                     abs(electric_field_evolution[0])) / times[mid_idx]
-                print(f"估计Landau阻尼率: γ ≈ {damping_rate:.4f}")
-    
-    def save_model(self, filename="vlasov_poisson_model"):
-        """保存模型"""
-        self.model.save(filename)
-        print(f"💾 模型已保存为 {filename}")
-    
-    def load_model(self, filename="vlasov_poisson_model"):
-        """加载模型"""
-        self.model.restore(filename)
-        print(f"📂 模型已从 {filename} 加载")
 
 
 def main():
-    """主函数 - 演示Vlasov-Poisson求解器"""
-    print("⚡ Vlasov-Poisson方程组求解器演示")
-    
-    # 创建Landau阻尼案例的求解器
-    solver = VlasovPoissonSolver(
-        x_domain=(-1.0, 1.0),
-        v_domain=(-3.0, 3.0),
-        time_domain=(0.0, 1.0),
-        case="landau_damping"
+    import argparse
+    parser = argparse.ArgumentParser(description="1D1V Vlasov–Poisson PINN (discrete-v)")
+    parser.add_argument("--adam_iters", type=int, default=8000, help="Adam 迭代次数")
+    parser.add_argument("--adam_lr", type=float, default=8e-4, help="Adam 学习率")
+    parser.add_argument("--lbfgs", action="store_true", help="是否启用 L-BFGS")
+    parser.add_argument("--Nv", type=int, default=24, help="速度离散节点数")
+    parser.add_argument("--amp", type=float, default=0.05, help="扰动幅度")
+    parser.add_argument("--k", type=float, default=1.0, help="模数 k")
+    args = parser.parse_args()
+
+    solver = VP1D1VDiscreteV(
+        x_domain=(-np.pi, np.pi),
+        t_domain=(0.0, 2.0),
+        v_domain=(-6.0, 6.0),
+        num_velocity_nodes=args.Nv,
+        amplitude=args.amp,
+        k_mode=args.k,
+        neutral_density=1.0,
+        use_gl_quadrature=True,
     )
-    
-    # 设置几何域和条件
-    solver.setup_geometry_and_conditions()
-    
-    # 可视化初始条件
-    solver.visualize_initial_conditions()
-    
-    # 创建模型 (6D系统需要更多参数和计算资源)
-    solver.create_model(
-        num_domain=8000,  # 6D系统需要大量采样点
-        num_boundary=600,
-        num_initial=600,
-        layer_sizes=[3, 128, 128, 128, 128, 2],  # 更大的网络
-        activation="tanh"
+    solver.build_data(num_domain=6000, num_boundary=400, num_initial=800, train_distribution="uniform")
+    solver.build_network(hidden_sizes=(128, 128, 128, 128), activation="tanh")
+    solver.build_model()
+    print(
+        f"构建完成：Nv={solver.Nv}, x∈[{solver.x_min},{solver.x_max}], t∈[{solver.t_min},{solver.t_max}], v∈[{solver.v_min},{solver.v_max}]"
     )
-    
-    # 训练模型 (6D系统训练时间很长)
-    solver.train(
-        adam_iterations=15000,  # 更多迭代
-        adam_lr=0.0008,        # 较小学习率
-        use_lbfgs=True,
-        weights_pde=[1.0, 0.1]  # Poisson方程权重较小
-    )
-    
-    # 可视化结果
-    solver.visualize_phase_space_evolution()
-    solver.analyze_plasma_dynamics()
-    
-    # 保存模型
-    solver.save_model("vlasov_poisson_landau")
-    
-    print("\n🎉 Vlasov-Poisson系统求解完成！")
+    losshistory, train_state = solver.train(adam_iters=args.adam_iters, adam_lr=args.adam_lr, use_lbfgs=args.lbfgs)
+
+    # 训练后做同样的可视化
+    x_plot = np.linspace(solver.x_min, solver.x_max, 200)
+    t_show = [0.0, (solver.t_min + solver.t_max) * 0.5, solver.t_max]
+    plt.figure(figsize=(8, 4))
+    for ts in t_show:
+        pts = np.column_stack([x_plot, np.full_like(x_plot, ts)])
+        out = solver.model.predict(pts)
+        phi = out[:, solver.Nv]
+        plt.plot(x_plot, phi, label=f"t={ts:.2f}")
+    plt.title("电势 phi(x,t)")
+    plt.xlabel("x")
+    plt.ylabel("phi")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    nx, nv = 128, solver.Nv
+    x_grid = np.linspace(solver.x_min, solver.x_max, nx)
+    t_slice = min(solver.t_max, 0.8 * solver.t_max)
+    F = np.zeros((nv, nx))
+    for j, x0 in enumerate(x_grid):
+        pts = np.array([[x0, t_slice]])
+        out = solver.model.predict(pts).reshape(-1)
+        F[:, j] = out[: solver.Nv]
+    plt.figure(figsize=(8, 4))
+    extent = [solver.x_min, solver.x_max, solver.v_min, solver.v_max]
+    plt.imshow(F, aspect="auto", origin="lower", extent=extent, cmap="viridis")
+    plt.colorbar(label="f(x,v,t)")
+    plt.xlabel("x")
+    plt.ylabel("v (离散节点)")
+    plt.title(f"f(x,v,t) @ t={t_slice:.2f}")
+    plt.tight_layout()
+    plt.show()
+
+    if hasattr(losshistory, "loss_train"):
+        plt.figure(figsize=(6, 4))
+        lt = losshistory.loss_train
+        if isinstance(lt, (list, tuple)) and len(lt) and isinstance(lt[0], (list, tuple)):
+            lt = [sum(x) for x in lt]
+        plt.semilogy(lt, label="train")
+        if getattr(losshistory, "loss_test", None) is not None:
+            plt.semilogy(losshistory.loss_test, label="test")
+        plt.xlabel("iteration")
+        plt.ylabel("loss")
+        plt.title("Training Loss")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
 
 
 if __name__ == "__main__":
-    # 设置matplotlib支持中文
-    plt.rcParams['font.sans-serif'] = ['Arial', 'SimHei']
-    plt.rcParams['axes.unicode_minus'] = False
-    
-    # 运行主程序
-    main()
+    # 支持命令行自定义；无参数时运行 quick_run
+    import sys
+    if len(sys.argv) > 1:
+        main()
+    else:
+        quick_run()
+
+
